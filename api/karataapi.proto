@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+// The realtime protocol for the template match engine.
+package api;
+
+option go_package = "./api";
+
+// The complete set of opcodes used for communication between clients and server.
+enum OpCode {
+  // No opcode specified. Unused.
+  OPCODE_UNSPECIFIED = 0;
+  // New game round starting.
+  OPCODE_START = 1;
+  // Update to the state of an ongoing round.
+  OPCODE_UPDATE = 2;
+  // A game round has just completed.
+  OPCODE_DONE = 3;
+  // A move the player wishes to make and sends to the server.
+  OPCODE_MOVE = 4;
+  // Move was rejected.
+  OPCODE_REJECTED = 5;
+  // Opponent has left the game.
+  OPCODE_OPPONENT_LEFT = 6;
+  // Invite AI player to join instead of the opponent who left the game.
+  OPCODE_INVITE_AI = 7;
+}
+
+message PlayerState {
+  repeated Card hand = 1;
+  bool turn = 2;
+  bool last_card = 3;
+  // Add any other relevant player state information.
+}
+
+message Deck{
+  repeated Card cards = 1;
+}
+
+enum Suit {
+  Hearts = 0;
+  Diamonds = 1;
+  Clubs = 2;
+  Spades = 3;
+  Joker = 4;
+  // Add other suits if needed.
+}
+message Card{
+
+  Suit suit = 1;
+  int32 rank = 2;
+}
+//Message data sent by server to client representing a new game round starting
+
+message Start{
+  repeated Card drop_zone = 1; // The cards in the discard pile.
+  repeated Card deck = 2; // The cards in the draw pile.
+  repeated PlayerState players = 3; // The state of each player in the game.
+  bool game_over = 4;  // Indicates whether the game has ended.
+  int32 current_turn = 5;  // Index or ID of the player whose turn it currently is.
+  Card current_card = 6; //The card currently at the top of the discard pile.
+}
+
+// A game state update sent by the server to clients.
+message Update {
+  Card current_card = 1;//The card currently at the top of the discard pile.
+  repeated Card deck = 2;// The cards in the draw pile.
+  int32 current_turn = 3;// Index or ID of the player whose turn it currently is.
+  repeated PlayerState players = 4;// The state of each player in the game.
+}
+
+message Board {
+  Deck deck = 1;
+  Card current_card = 2;
+  int32  no_of_cards_to_deal = 3;
+  repeated Card drop_zone = 4;
+  map<string, PlayerState> player_states = 5;
+
+}
