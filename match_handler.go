@@ -7,6 +7,7 @@ import (
 	"github.com/heroiclabs/nakama-common/runtime"
 	"quana.co.tz/karata/api"
 	"quana.co.tz/karata/core"
+	"quana.co.tz/karata/events"
 	"time"
 )
 
@@ -47,13 +48,9 @@ type MatchState struct {
 	requiredPlayerCount    int
 	board                  core.Board
 	winner                 string
-	Service                core.ServiceImpl
+	GameHandler            core.GameHandlerImpl
 	// Ticks until they must submit their move.
 	deadlineRemainingTicks int64
-}
-
-type PlayerState struct {
-	presence runtime.Presence
 }
 
 func (ms *MatchState) ConnectedCount() int {
@@ -70,7 +67,7 @@ func (m *MatchHandler) MatchInit(ctx context.Context, logger runtime.Logger, db 
 	//create nakama service instance
 
 	////create a game service instance with Nakama service as a dependency
-	service := &core.ServiceImpl{}
+	service := &core.GameHandlerImpl{}
 
 	isPrivate, ok := params["isPrivate"].(bool)
 	if !ok {
@@ -94,7 +91,7 @@ func (m *MatchHandler) MatchInit(ctx context.Context, logger runtime.Logger, db 
 		label:               label,
 		presences:           make(map[string]runtime.Presence),
 		requiredPlayerCount: 2,
-		Service:             *service,
+		GameHandler:         *service,
 	}
 
 	return state, tickRate, string(labelJSON)
@@ -133,21 +130,21 @@ func (m *MatchHandler) MatchJoin(ctx context.Context, logger runtime.Logger, db 
 		s.joinsInProgress--
 
 		// Check if we must send a message to this user to update them on the current game state.
-		var opCode api.OpCode
+		var opCode events.EventType
 		var msg api.Message
 		if s.playing {
 			// There's a game still currently in progress, the player is re-joining after a disconnect. Give them a state update.
-			opCode = api.Update
+			opCode = events.EventTypeUpdate
 			msg = &api.UpdateMessage{
 				Deck:        s.board.Deck,
 				CurrentCard: s.board.CurrentCard,
-				CurrentTurn: s.board.CurrentTurn,
+				CurrentTurn: s.board.ActivePlayerId,
 				GameOver:    false,
 			}
 		} else if s.board.DropZone != nil {
 			// There's no game in progress but we still have a completed game that the user was part of.
 			// They likely disconnected before the game ended, and have since forfeited because they took too long to return.
-			opCode = api.NextTurn
+			opCode = events.EventTypeNextTurn
 			msg = &api.DoneMessage{
 				Winner: s.winner,
 			}
@@ -191,7 +188,7 @@ func (m *MatchHandler) MatchLeave(ctx context.Context, logger runtime.Logger, db
 	}
 	// Notify remaining player that the opponent has left the game
 	if len(humanPlayersRemaining) == 1 {
-		_ = dispatcher.BroadcastMessage(int64(api.OpponentLeft), nil, humanPlayersRemaining, nil, true)
+		_ = dispatcher.BroadcastMessage(int64(events.EventTypeOpponentLeft), nil, humanPlayersRemaining, nil, true)
 	}
 
 	return s
@@ -225,7 +222,7 @@ func (m *MatchHandler) MatchLoop(ctx context.Context, logger runtime.Logger, db 
 			if labelJSON, err := json.Marshal(s.label); err != nil {
 				logger.Error("error encoding label: %v", err)
 			} else {
-				logger.Debug("Update label : %s", string(labelJSON))
+				logger.Debug("EventTypeUpdate label : %s", string(labelJSON))
 
 				if err := dispatcher.MatchLabelUpdate(string(labelJSON)); err != nil {
 					logger.Error("error updating label: %v", err)
@@ -255,7 +252,7 @@ func (m *MatchHandler) MatchLoop(ctx context.Context, logger runtime.Logger, db 
 			})
 		}
 
-		s.board = s.Service.ActionStartGame(players, 5)
+		s.board = s.GameHandler.ActionStartGame(players, 5)
 		s.deadlineRemainingTicks = calculateDeadlineTicks()
 		s.nextGameRemainingTicks = 0
 
@@ -269,53 +266,54 @@ func (m *MatchHandler) MatchLoop(ctx context.Context, logger runtime.Logger, db 
 		if err != nil {
 			logger.Error("error encoding message: %v", err)
 		} else {
-			_ = dispatcher.BroadcastMessage(int64(api.Start), buf, nil, nil, true)
+			_ = dispatcher.BroadcastMessage(int64(events.EventTypeStart), buf, nil, nil, true)
 		}
 		return s
 	}
 
 	// There's a game in progress. Check for input, update match state, and send messages to clients.
 	for _, message := range messages {
-		switch api.OpCode(message.GetOpCode()) {
-		case api.CardPlayed:
-			msg := &api.CardPlayedMessage{}
+		switch events.EventType(message.GetOpCode()) {
+		case events.EventTypeCardPlayed:
+			msg := &api.UpdateMessage{}
 			err := json.Unmarshal(message.GetData(), msg)
 			if err != nil {
 				// Client sent bad data.
-				_ = dispatcher.BroadcastMessage(int64(api.Rejected), nil, []runtime.Presence{message}, nil, true)
+				_ = dispatcher.BroadcastMessage(int64(events.EventTypeRejected), nil, []runtime.Presence{message}, nil, true)
 				continue
 			}
-			err = s.Service.ActionPlayCard(&s.board, &msg.Card, message.GetUserId())
+			err = s.GameHandler.ActionPlayCard(&s.board, &msg.CardPlayed, message.GetUserId())
 			if err != nil {
 				logger.Error("error ActionPlayCard: %v", err)
 			} else {
-				_ = dispatcher.BroadcastMessage(int64(api.CardPlayed), message.GetData(), nil, nil, true)
+				_ = dispatcher.BroadcastMessage(int64(events.EventTypeCardPlayed), message.GetData(), nil, nil, true)
 			}
-		case api.NextTurn:
-			if message.GetUserId() != s.board.CurrentTurn {
-				_ = dispatcher.BroadcastMessage(int64(api.Rejected), nil, []runtime.Presence{message}, nil, true)
+		case events.EventTypeNextTurn:
+			if message.GetUserId() != s.board.ActivePlayerId {
+				_ = dispatcher.BroadcastMessage(int64(events.EventTypeRejected), nil, []runtime.Presence{message}, nil, true)
 				return nil
 			}
-			err := s.Service.ActionNextTurn(&s.board, message.GetUserId(), s.playing)
+			err := s.GameHandler.ActionNextTurn(&s.board, message.GetUserId(), s.playing)
 			if err != nil {
 				logger.Error("error ActionNextTurn: %v", err)
 				return nil
 			}
+
 			buf, err := json.Marshal(&api.UpdateMessage{
 				Deck:        s.board.Deck,
 				CurrentCard: s.board.CurrentCard,
-				CurrentTurn: s.board.CurrentTurn,
+				CurrentTurn: s.board.ActivePlayerId,
 				Penalties:   s.board.Penalties,
 			})
 			if err != nil {
 				logger.Error("error encoding message: %v", err)
 			} else {
-				_ = dispatcher.BroadcastMessage(int64(api.Update), buf, nil, nil, true)
+				_ = dispatcher.BroadcastMessage(int64(events.EventTypeNextTurn), buf, nil, nil, true)
 			}
-		case api.OpponentLeft:
+		case events.EventTypeOpponentLeft:
 		default:
 			// No other opcodes are expected from the client, so automatically treat it as an error.
-			_ = dispatcher.BroadcastMessage(int64(api.Rejected), nil, []runtime.Presence{message}, nil, true)
+			_ = dispatcher.BroadcastMessage(int64(events.EventTypeRejected), nil, []runtime.Presence{message}, nil, true)
 		}
 	}
 	return s

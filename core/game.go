@@ -1,10 +1,8 @@
 package core
 
-type Service interface {
-	ActionStartGame(players []PlayerState, nbCards int)
-	ActionPlayCard(board *Board, cardToPlay *Card, playerID string)
-	ActionNextTurn(board *Board, playerID string, isPlaying bool)
-	ActionDrawCard(board *Board, playerID string, cardToDraw *Card)
+type GameHandler interface {
+	ActionStartGame(players []PlayerState, nbCards int) Board
+	ActionPlayCard(board *Board, cardToPlay *Card, playerID string) error
+	ActionNextTurn(board *Board, playerID string, isPlaying bool) error
+	ActionDrawCard(board *Board, playerID string, cardToDraw []Card) error
 }
-
-type ServiceImpl struct{}
